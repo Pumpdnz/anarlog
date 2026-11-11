@@ -50,8 +50,23 @@ struct Ctx {
 use super::{BUFFER_SIZE, CHUNK_SIZE};
 
 impl SpeakerInput {
-    pub fn new() -> Result<Self> {
-        let tap_desc = ca::TapDesc::with_mono_global_tap_excluding_processes(&ns::Array::new());
+    pub fn new(device_uid: Option<&str>) -> Result<Self> {
+        let tap_desc = match device_uid {
+            None => ca::TapDesc::with_mono_global_tap_excluding_processes(&ns::Array::new()),
+            // Every process's output to one device, in mono. Core Audio reads
+            // the device only from this initializer, and only while mixdown
+            // stays false: setting deviceUID or stream on a global tap, or
+            // mixdown on this one, records every device again.
+            Some(uid) => {
+                let mut desc = ca::TapDesc::alloc().init_excluding_processes_and_device(
+                    &ns::Array::new(),
+                    &ns::String::with_str(uid),
+                    0,
+                );
+                desc.set_mono(true);
+                desc
+            }
+        };
         let tap = tap_desc.create_process_tap()?;
         let tap_uid = tap.uid()?;
         let sample_rate = tap.asbd()?.sample_rate as u32;

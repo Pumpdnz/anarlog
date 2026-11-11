@@ -45,7 +45,19 @@ pub type SpeakerStream = macos::SpeakerStream;
 
 impl SpeakerInput {
     pub fn new() -> Result<Self> {
-        let inner = PlatformSpeakerInput::new()?;
+        Self::with_device_uid(None)
+    }
+
+    /// Taps only the output device with this UID; `None` is `new()`'s global tap.
+    /// Only macOS scopes the tap; other platforms ignore the UID.
+    pub fn with_device_uid(device_uid: Option<&str>) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        let inner = PlatformSpeakerInput::new(device_uid)?;
+        #[cfg(not(target_os = "macos"))]
+        let inner = {
+            let _ = device_uid;
+            PlatformSpeakerInput::new()?
+        };
         Ok(Self { inner })
     }
 

@@ -13,7 +13,7 @@ pub(crate) fn open_speaker_capture(
     sample_rate: u32,
     chunk_size: usize,
 ) -> Result<CaptureStream, Error> {
-    let speaker_stream = setup_speaker_stream(sample_rate, chunk_size)?;
+    let speaker_stream = setup_speaker_stream(sample_rate, chunk_size, None)?;
     Ok(stream::open_single(speaker_stream, CaptureSide::Speaker))
 }
 

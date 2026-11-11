@@ -90,6 +90,7 @@ impl AudioProvider for MockAudio {
                 chunk_size,
                 mic_device: None,
                 enable_aec: false,
+                speaker_tap_device_uid: None,
             },
         ))
     }
@@ -109,6 +110,7 @@ impl AudioProvider for MockAudio {
                 chunk_size,
                 mic_device: None,
                 enable_aec: false,
+                speaker_tap_device_uid: None,
             },
         ))
     }

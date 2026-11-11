@@ -195,6 +195,7 @@ async fn run_stream_loop(mut ctx: StreamContext, mode: ChannelMode) {
                 chunk_size,
                 mic_device: ctx.mic_device.clone(),
                 enable_aec: ctx.enable_aec,
+                speaker_tap_device_uid: None,
             };
             ctx.audio.open_capture(config)
         }

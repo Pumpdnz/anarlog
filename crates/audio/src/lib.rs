@@ -34,6 +34,9 @@ pub struct CaptureConfig {
     pub chunk_size: usize,
     pub mic_device: Option<String>,
     pub enable_aec: bool,
+    /// Scopes the speaker tap to one output device by its UID. `None` taps
+    /// every process on every device. Only macOS reads it.
+    pub speaker_tap_device_uid: Option<String>,
 }
 
 #[derive(Debug, Clone)]

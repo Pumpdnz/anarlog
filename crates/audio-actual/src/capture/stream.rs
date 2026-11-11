@@ -74,8 +74,9 @@ pub(crate) fn setup_mic_stream(
 pub(crate) fn setup_speaker_stream(
     sample_rate: u32,
     chunk_size: usize,
+    device_uid: Option<&str>,
 ) -> Result<ChunkStream, Error> {
-    let speaker = SpeakerInput::new()
+    let speaker = SpeakerInput::with_device_uid(device_uid)
         .map_err(|error| Error::SpeakerStreamInitializationFailed(error.to_string()))?;
     speaker
         .stream()
@@ -94,6 +95,7 @@ pub(crate) fn open_recovering(config: CaptureConfig) -> CaptureStream {
     let aec_enabled = Arc::new(AtomicBool::new(config.enable_aec));
     let aec_config = aec_enabled.clone();
     let speaker_output_retry = speaker_retry.clone();
+    let speaker_tap_device_uid = config.speaker_tap_device_uid.clone();
     let task = tokio::spawn(async move {
         let (chunks_tx, chunks_rx) = tokio::sync::mpsc::channel(32);
         let rate = config.sample_rate;
@@ -151,7 +153,7 @@ pub(crate) fn open_recovering(config: CaptureConfig) -> CaptureStream {
             CaptureChannel::Speaker,
             Arc::new(move |_, _| {
                 Ok(OpenedChannel {
-                    stream: setup_speaker_stream(rate, size)?,
+                    stream: setup_speaker_stream(rate, size, speaker_tap_device_uid.as_deref())?,
                     device: None,
                 })
             }),
