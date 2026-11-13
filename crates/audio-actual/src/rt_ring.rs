@@ -98,8 +98,11 @@ where
     }
 }
 
+/// Converts interleaved samples to f32 and pushes them as mono, one sample per
+/// frame: a frame of `channels` samples is pushed as their average.
 pub(crate) fn convert_and_push_to_ringbuf<T, P>(
     samples: &[T],
+    channels: usize,
     scratch: &mut [f32],
     producer: &mut P,
     mut convert: impl FnMut(T) -> f32,
@@ -108,11 +111,12 @@ where
     T: Copy,
     P: Producer<Item = f32>,
 {
-    if scratch.is_empty() {
+    if scratch.is_empty() || channels == 0 {
         return PushStats::default();
     }
 
-    if samples.is_empty() {
+    let frame_count = samples.len() / channels;
+    if frame_count == 0 {
         return PushStats::default();
     }
 
@@ -120,19 +124,24 @@ where
     let mut pushed_total = 0usize;
     let mut dropped_total = 0usize;
 
-    while offset < samples.len() {
-        let count = (samples.len() - offset).min(scratch.len());
+    while offset < frame_count {
+        let count = (frame_count - offset).min(scratch.len());
 
         let vacant = producer.vacant_len();
         if vacant == 0 {
-            dropped_total += samples.len() - offset;
+            dropped_total += frame_count - offset;
             break;
         }
 
         let convert_count = count.min(vacant);
 
-        for i in 0..convert_count {
-            scratch[i] = convert(samples[offset + i]);
+        for (i, slot) in scratch[..convert_count].iter_mut().enumerate() {
+            let frame = &samples[(offset + i) * channels..(offset + i + 1) * channels];
+            *slot = if channels == 1 {
+                convert(frame[0])
+            } else {
+                frame.iter().map(|&x| convert(x)).sum::<f32>() / channels as f32
+            };
         }
 
         let pushed = producer.push_slice(&scratch[..convert_count]);
@@ -145,21 +154,6 @@ where
     PushStats {
         pushed: pushed_total,
         dropped: dropped_total,
-    }
-}
-
-pub(crate) fn push_f32_to_ringbuf<P>(data: &[f32], producer: &mut P) -> PushStats
-where
-    P: Producer<Item = f32>,
-{
-    if data.is_empty() {
-        return PushStats::default();
-    }
-
-    let pushed = producer.push_slice(data);
-    PushStats {
-        pushed,
-        dropped: data.len() - pushed,
     }
 }
 

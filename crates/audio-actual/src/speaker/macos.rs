@@ -117,34 +117,9 @@ impl SpeakerInput {
             _output_time: &cat::AudioTimeStamp,
             ctx: Option<&mut Ctx>,
         ) -> os::Status {
-            let Some(ctx) = ctx else {
-                return os::Status::NO_ERR;
-            };
-
-            let first_buffer = &input_data.buffers[0];
-
-            if first_buffer.data_bytes_size == 0 || first_buffer.data.is_null() {
-                return os::Status::NO_ERR;
+            if let Some(ctx) = ctx {
+                push_input_buffer(ctx, &input_data.buffers[0]);
             }
-
-            match ctx.common_format {
-                av::audio::CommonFormat::PcmF32 => {
-                    if let Some(samples) = read_samples::<f32>(first_buffer) {
-                        process_audio_data_rt_safe(ctx, samples);
-                    }
-                }
-                av::audio::CommonFormat::PcmF64 => {
-                    process_samples_rt_safe::<f64>(ctx, first_buffer, pcm_f64_to_f32);
-                }
-                av::audio::CommonFormat::PcmI32 => {
-                    process_samples_rt_safe::<i32>(ctx, first_buffer, pcm_i32_to_f32);
-                }
-                av::audio::CommonFormat::PcmI16 => {
-                    process_samples_rt_safe::<i16>(ctx, first_buffer, pcm_i16_to_f32);
-                }
-                _ => {}
-            }
-
             os::Status::NO_ERR
         }
 
@@ -201,6 +176,33 @@ impl SpeakerInput {
     }
 }
 
+/// The IO proc's work for one input buffer: convert it to f32 and push it into
+/// the ring as mono. The tap is created mono, but Core Audio delivers a
+/// device-scoped tap as the device's interleaved channels after another client
+/// reconfigures that device, so the channel count is read from every buffer.
+fn push_input_buffer(ctx: &mut Ctx, buffer: &cat::AudioBuf) {
+    if buffer.data_bytes_size == 0 || buffer.data.is_null() {
+        return;
+    }
+    let channels = buffer.number_channels.max(1) as usize;
+
+    match ctx.common_format {
+        av::audio::CommonFormat::PcmF32 => {
+            process_samples_rt_safe::<f32>(ctx, buffer, channels, |x| x);
+        }
+        av::audio::CommonFormat::PcmF64 => {
+            process_samples_rt_safe::<f64>(ctx, buffer, channels, pcm_f64_to_f32);
+        }
+        av::audio::CommonFormat::PcmI32 => {
+            process_samples_rt_safe::<i32>(ctx, buffer, channels, pcm_i32_to_f32);
+        }
+        av::audio::CommonFormat::PcmI16 => {
+            process_samples_rt_safe::<i16>(ctx, buffer, channels, pcm_i16_to_f32);
+        }
+        _ => {}
+    }
+}
+
 fn read_samples<T: Copy>(buffer: &cat::AudioBuf) -> Option<&[T]> {
     let byte_count = buffer.data_bytes_size as usize;
 
@@ -221,8 +223,12 @@ fn read_samples<T: Copy>(buffer: &cat::AudioBuf) -> Option<&[T]> {
     Some(unsafe { std::slice::from_raw_parts(data, sample_count) })
 }
 
-fn process_samples_rt_safe<T>(ctx: &mut Ctx, buffer: &cat::AudioBuf, convert: impl FnMut(T) -> f32)
-where
+fn process_samples_rt_safe<T>(
+    ctx: &mut Ctx,
+    buffer: &cat::AudioBuf,
+    channels: usize,
+    convert: impl FnMut(T) -> f32,
+) where
     T: Copy + 'static,
 {
     let Some(samples) = read_samples::<T>(buffer) else {
@@ -231,24 +237,11 @@ where
 
     let stats = crate::rt_ring::convert_and_push_to_ringbuf(
         samples,
+        channels,
         &mut ctx.conversion_buffer,
         &mut ctx.producer,
         convert,
     );
-
-    if stats.dropped > 0 {
-        ctx.dropped_samples
-            .fetch_add(stats.dropped, Ordering::Relaxed);
-    }
-
-    if stats.pushed > 0 && ctx.wake_pending.load(Ordering::Acquire) {
-        ctx.wake_pending.store(false, Ordering::Release);
-        ctx.waker.wake();
-    }
-}
-
-fn process_audio_data_rt_safe(ctx: &mut Ctx, data: &[f32]) {
-    let stats = crate::rt_ring::push_f32_to_ringbuf(data, &mut ctx.producer);
 
     if stats.dropped > 0 {
         ctx.dropped_samples
@@ -309,5 +302,70 @@ impl AsyncSource for SpeakerStream {
 impl PinnedDrop for SpeakerStream {
     fn drop(self: std::pin::Pin<&mut Self>) {
         tracing::debug!("SpeakerStream dropping");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ringbuf::traits::{Consumer, Observer};
+
+    use super::*;
+
+    const FRAMES: usize = 512;
+
+    fn ctx() -> (Box<Ctx>, HeapCons<f32>) {
+        let (producer, consumer) = HeapRb::<f32>::new(BUFFER_SIZE).split();
+        let ctx = Box::new(Ctx {
+            common_format: av::audio::CommonFormat::PcmF32,
+            producer,
+            waker: Arc::new(AtomicWaker::new()),
+            wake_pending: Arc::new(AtomicBool::new(false)),
+            dropped_samples: Arc::new(AtomicUsize::new(0)),
+            conversion_buffer: vec![0.0f32; crate::rt_ring::DEFAULT_SCRATCH_LEN],
+        });
+        (ctx, consumer)
+    }
+
+    fn buffer(samples: &mut [f32], channels: u32) -> cat::AudioBuf {
+        cat::AudioBuf {
+            number_channels: channels,
+            data_bytes_size: std::mem::size_of_val(samples) as u32,
+            data: samples.as_mut_ptr().cast(),
+        }
+    }
+
+    fn drain(consumer: &mut HeapCons<f32>) -> Vec<f32> {
+        let mut out = vec![0.0; consumer.occupied_len()];
+        consumer.pop_slice(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_mono_buffer_is_pushed_sample_for_sample() {
+        let (mut ctx, mut consumer) = ctx();
+        let mut samples: Vec<f32> = (0..FRAMES).map(|i| i as f32 / FRAMES as f32).collect();
+        let expected = samples.clone();
+
+        push_input_buffer(&mut ctx, &buffer(&mut samples, 1));
+
+        assert_eq!(drain(&mut consumer), expected);
+    }
+
+    // Core Audio delivers a device-scoped mono tap as the device's own
+    // interleaved channels once another client reconfigures the device (a
+    // voice-processing unit on a 16-channel output did it). One frame of
+    // audio is then 16 floats, and must still be one mono sample.
+    #[test]
+    fn an_interleaved_sixteen_channel_buffer_is_pushed_as_one_mono_sample_per_frame() {
+        let (mut ctx, mut consumer) = ctx();
+        let mut samples = vec![0.0f32; FRAMES * 16];
+        for frame in samples.chunks_mut(16) {
+            frame[0] = 0.8;
+            frame[1] = 0.8;
+        }
+
+        push_input_buffer(&mut ctx, &buffer(&mut samples, 16));
+
+        assert_eq!(drain(&mut consumer), vec![0.1f32; FRAMES]);
     }
 }
